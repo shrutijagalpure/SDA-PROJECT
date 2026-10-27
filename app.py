@@ -9,6 +9,8 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     confusion_matrix, classification_report
 )
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
 
 st.set_page_config(page_title="Explainable Intrusion Detection", page_icon="🛡️", layout="wide")
 
@@ -73,10 +75,10 @@ def prepare_ml_data(df, label_col, max_rows, seed=42):
     X = X.loc[:, ~X.columns.duplicated()]
     X = X.apply(pd.to_numeric, errors="coerce")
     X = X.replace([np.inf, -np.inf], np.nan)
-    # Remove empty columns and fill remaining missing values with training-independent medians.
+    # Remove columns that are entirely missing; remaining missing values are imputed inside the training pipeline.
     X = X.dropna(axis=1, how="all")
     X = X.loc[:, X.nunique(dropna=True) > 1]
-    X = X.fillna(X.median(numeric_only=True)).fillna(0)
+
     # Drop columns that can directly identify a record or are commonly non-feature metadata.
     remove = [c for c in X.columns if c.lower() in {"flow id", "source ip", "destination ip", "timestamp", "unnamed: 0"}]
     X = X.drop(columns=remove, errors="ignore")
@@ -190,15 +192,19 @@ except (ValueError, StopIteration) as exc:
     st.error(f"Unable to split this dataset for evaluation: {exc}")
     st.stop()
 
+
 @st.cache_resource(show_spinner="Training Random Forest model...")
 def train_random_forest(X_train, y_train, n_estimators):
-    model = RandomForestClassifier(
-        n_estimators=n_estimators,
-        random_state=42,
-        class_weight="balanced_subsample",
-        n_jobs=-1,
-        min_samples_leaf=1
-    )
+    model = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("classifier", RandomForestClassifier(
+            n_estimators=n_estimators,
+            random_state=42,
+            class_weight="balanced_subsample",
+            n_jobs=-1,
+            min_samples_leaf=1
+        ))
+    ])
     model.fit(X_train, y_train)
     return model
 
@@ -291,7 +297,10 @@ with tab3:
             ax.tick_params(axis="x", rotation=35); ax.legend()
             st.pyplot(fig)
     st.markdown("#### Global ML feature importance")
-    importances = pd.DataFrame({"Feature": X.columns, "Importance": model.feature_importances_}).sort_values("Importance", ascending=False).head(20)
+    importances = pd.DataFrame({
+        "Feature": X.columns,
+        "Importance": model.named_steps["classifier"].feature_importances_
+    }).sort_values("Importance", ascending=False).head(20)
     st.dataframe(importances.round(5), use_container_width=True, hide_index=True)
     fig, ax = plt.subplots()
     plot_imp = importances.sort_values("Importance")
@@ -355,7 +364,7 @@ with tab5:
             st.write(f"Model confidence (maximum class probability): **{probabilities.max():.1%}**")
             prob_df = pd.DataFrame({"Class": model.classes_, "Probability": probabilities}).sort_values("Probability", ascending=False)
             st.dataframe(prob_df, use_container_width=True, hide_index=True)
-            row_imp = pd.DataFrame({"Feature": X.columns, "Global importance": model.feature_importances_})
+            row_imp = pd.DataFrame({"Feature": X.columns, "Global importance": model.named_steps["classifier"].feature_importances_})
             row_imp = row_imp.sort_values("Global importance", ascending=False).head(10)
             st.caption("The table below shows the top global features used by the model, not per-record causal attribution.")
             st.dataframe(row_imp.round(5), use_container_width=True, hide_index=True)
